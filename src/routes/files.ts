@@ -71,9 +71,14 @@ export function registerFileRoutes(app: Hono) {
         realPath = path.resolve(fullPath);
       }
 
-      const realGhqRoot = fs.realpathSync(GHQ_ROOT);
+      // Security: verify the resolved path stays within allowed roots.
+      // GHQ_ROOT may not exist on this machine (no ghq install) — guard realpathSync.
       const realRepoRoot = fs.realpathSync(REPO_ROOT);
-      if (!realPath.startsWith(realGhqRoot) && !realPath.startsWith(realRepoRoot)) {
+      let realGhqRoot: string | null = null;
+      try { realGhqRoot = fs.realpathSync(GHQ_ROOT); } catch { /* GHQ_ROOT doesn't exist */ }
+      const inRepo = realPath.startsWith(realRepoRoot);
+      const inGhq = realGhqRoot !== null && realPath.startsWith(realGhqRoot);
+      if (!inRepo && !inGhq) {
         return c.json({ error: 'Invalid path: outside allowed bounds' }, 400);
       }
 
