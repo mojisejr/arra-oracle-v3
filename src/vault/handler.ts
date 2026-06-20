@@ -47,6 +47,64 @@ export interface SyncResult {
   commitHash?: string; project?: string | null;
 }
 
+type SyncWriteOp = { source: string; dest: string; content?: string };
+type SyncDeleteOp = { path: string; stopAt: string };
+type SyncPlan = {
+  writes: SyncWriteOp[];
+  deletes: SyncDeleteOp[];
+  added: number;
+  modified: number;
+  deleted: number;
+};
+
+function sameFileContent(dest: string, source: string, content?: string): boolean {
+  if (!fs.existsSync(dest)) return false;
+  if (content !== undefined) return fs.readFileSync(dest, 'utf-8') === content;
+  return fs.readFileSync(dest).equals(fs.readFileSync(source));
+}
+
+function planSync(psiDir: string, repoRoot: string, vaultPath: string, project: string | null): SyncPlan {
+  const diskFiles = walkFiles(psiDir, repoRoot);
+  const vaultDestPaths = new Set<string>();
+  const writes: SyncWriteOp[] = [];
+  const deletes: SyncDeleteOp[] = [];
+  let added = 0;
+  let modified = 0;
+
+  for (const { relativePath, fullPath } of diskFiles) {
+    const vaultRelPath = mapToVaultPath(relativePath, project);
+    vaultDestPaths.add(vaultRelPath);
+    const dest = path.join(vaultPath, vaultRelPath);
+    const content = project && fullPath.endsWith('.md') && isProjectCategory(relativePath)
+      ? ensureFrontmatterProject(fs.readFileSync(fullPath, 'utf-8'), project)
+      : undefined;
+
+    if (!sameFileContent(dest, fullPath, content)) {
+      fs.existsSync(dest) ? modified++ : added++;
+      writes.push({ source: fullPath, dest, content });
+    }
+  }
+
+  // Clean up vault files that no longer exist locally
+  if (project) {
+    const vaultProjectDir = path.join(vaultPath, project, 'ψ');
+    if (fs.existsSync(vaultProjectDir)) {
+      for (const { relativePath: vr, fullPath: vf } of walkFiles(vaultProjectDir, vaultPath)) {
+        if (!vaultDestPaths.has(vr)) deletes.push({ path: vf, stopAt: path.join(vaultPath, project) });
+      }
+    }
+  }
+  for (const category of UNIVERSAL_CATEGORIES) {
+    const vaultCategoryDir = path.join(vaultPath, category);
+    if (!fs.existsSync(vaultCategoryDir)) continue;
+    for (const { relativePath: vr, fullPath: vf } of walkFiles(vaultCategoryDir, vaultPath)) {
+      if (!vaultDestPaths.has(vr)) deletes.push({ path: vf, stopAt: path.join(vaultPath, 'ψ') });
+    }
+  }
+
+  return { writes, deletes, added, modified, deleted: deletes.length };
+}
+
 export function syncVault(opts: { dryRun?: boolean; repoRoot: string }): SyncResult {
   const { dryRun = false, repoRoot } = opts;
   const repo = getSetting('vault_repo');
@@ -59,43 +117,23 @@ export function syncVault(opts: { dryRun?: boolean; repoRoot: string }): SyncRes
   const project = detectProject(repoRoot) ?? null;
   console.error(`[Vault] Project: ${project || '(universal)'}`);
 
-  const diskFiles = walkFiles(psiDir, repoRoot);
-  const vaultDestPaths = new Set<string>();
+  const plan = planSync(psiDir, repoRoot, vaultPath, project);
+  const { added, modified, deleted } = plan;
+  if (dryRun) return { dryRun: true, added, modified, deleted, project };
 
-  for (const { relativePath, fullPath } of diskFiles) {
-    const vaultRelPath = mapToVaultPath(relativePath, project);
-    vaultDestPaths.add(vaultRelPath);
-    const dest = path.join(vaultPath, vaultRelPath);
+  for (const { source, dest, content } of plan.writes) {
     fs.mkdirSync(path.dirname(dest), { recursive: true });
-    if (project && fullPath.endsWith('.md') && isProjectCategory(relativePath)) {
-      const tagged = ensureFrontmatterProject(fs.readFileSync(fullPath, 'utf-8'), project);
-      fs.writeFileSync(dest, tagged);
-    } else {
-      fs.copyFileSync(fullPath, dest);
-    }
+    if (content !== undefined) fs.writeFileSync(dest, content);
+    else fs.copyFileSync(source, dest);
   }
-
-  // Clean up vault files that no longer exist locally
-  if (project) {
-    const vaultProjectDir = path.join(vaultPath, project, 'ψ');
-    if (fs.existsSync(vaultProjectDir)) {
-      for (const { relativePath: vr, fullPath: vf } of walkFiles(vaultProjectDir, vaultPath)) {
-        if (!vaultDestPaths.has(vr)) { fs.unlinkSync(vf); cleanEmptyDirs(path.dirname(vf), path.join(vaultPath, project)); }
-      }
-    }
-  }
-  for (const category of UNIVERSAL_CATEGORIES) {
-    const vaultCategoryDir = path.join(vaultPath, category);
-    if (!fs.existsSync(vaultCategoryDir)) continue;
-    for (const { relativePath: vr, fullPath: vf } of walkFiles(vaultCategoryDir, vaultPath)) {
-      if (!vaultDestPaths.has(vr)) { fs.unlinkSync(vf); cleanEmptyDirs(path.dirname(vf), path.join(vaultPath, 'ψ')); }
-    }
+  for (const { path: filePath, stopAt } of plan.deletes) {
+    fs.unlinkSync(filePath);
+    cleanEmptyDirs(path.dirname(filePath), stopAt);
   }
 
   execSync('git add -A', { cwd: vaultPath, stdio: 'pipe' });
   const status = execSync('git status --porcelain', { cwd: vaultPath, encoding: 'utf-8' }).trim();
-  const { added, modified, deleted } = parseGitStatus(status);
-  if (dryRun || !status) return { dryRun: true, added, modified, deleted, project };
+  if (!status) return { dryRun: true, added, modified, deleted, project };
 
   const now = new Date();
   const ts = now.toISOString().replace('T', ' ').replace(/\.\d+Z$/, '');
