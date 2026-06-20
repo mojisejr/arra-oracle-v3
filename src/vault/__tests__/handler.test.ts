@@ -5,7 +5,7 @@
  * ensureFrontmatterProject, and syncVault dry-run behavior.
  */
 
-import { beforeAll, describe, it, expect, mock } from 'bun:test';
+import { afterAll, beforeAll, describe, it, expect, mock } from 'bun:test';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -13,10 +13,44 @@ import { execSync as realExecSync } from 'child_process';
 
 let fakeVaultPath: string | null = null;
 const settings = new Map<string, string | null>();
+const previousOracleDataDir = process.env.ORACLE_DATA_DIR;
+const testOracleDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'oracle-data-'));
+process.env.ORACLE_DATA_DIR = testOracleDataDir;
+let fakeStats = { total: 0, last_indexed: null as string | null, index_age_hours: null as number | null };
+let fakeVectorStats = {
+  vector: { enabled: true, count: 0, collection: 'oracle_knowledge_bge_m3' },
+  vectors: [] as Array<{ key: string; model: string; collection: string; count: number; enabled: boolean }>,
+};
+let handleStatsCalls = 0;
+let handleVectorStatsCalls = 0;
 
 mock.module('../../db/index.ts', () => ({
   getSetting: (key: string) => settings.get(key) ?? null,
   setSetting: (key: string, value: string | null) => { settings.set(key, value); },
+}));
+
+mock.module('../../config.ts', () => ({
+  ORACLE_DATA_DIR: testOracleDataDir,
+  DB_PATH: path.join(testOracleDataDir, 'oracle.db'),
+}));
+
+mock.module('../config.ts', () => ({
+  ORACLE_DATA_DIR: testOracleDataDir,
+  DB_PATH: path.join(testOracleDataDir, 'oracle.db'),
+}));
+
+mock.module('../../server/handlers.ts', () => ({
+  handleStats: () => {
+    handleStatsCalls++;
+    return fakeStats;
+  },
+}));
+
+mock.module('../../server/vector-handlers.ts', () => ({
+  handleVectorStats: async () => {
+    handleVectorStatsCalls++;
+    return fakeVectorStats;
+  },
 }));
 
 mock.module('../discovery.ts', () => {
@@ -61,9 +95,16 @@ let mapToVaultPath: typeof import('../handler.ts').mapToVaultPath;
 let mapFromVaultPath: typeof import('../handler.ts').mapFromVaultPath;
 let ensureFrontmatterProject: typeof import('../handler.ts').ensureFrontmatterProject;
 let syncVault: typeof import('../handler.ts').syncVault;
+let vaultStatus: typeof import('../handler.ts').vaultStatus;
 
 beforeAll(async () => {
-  ({ parseGitStatus, mapToVaultPath, mapFromVaultPath, ensureFrontmatterProject, syncVault } = await import('../handler.ts'));
+  ({ parseGitStatus, mapToVaultPath, mapFromVaultPath, ensureFrontmatterProject, syncVault, vaultStatus } = await import('../handler.ts'));
+});
+
+afterAll(() => {
+  if (previousOracleDataDir === undefined) delete process.env.ORACLE_DATA_DIR;
+  else process.env.ORACLE_DATA_DIR = previousOracleDataDir;
+  fs.rmSync(testOracleDataDir, { recursive: true, force: true });
 });
 
 function setupSyncVaultFixture(prefix: string): {
@@ -309,6 +350,7 @@ describe('syncVault dry-run', () => {
 
   it('write-run applies add/modify/delete and reports the same counts', () => {
     const { vaultPath, repoRoot, vaultProjectPsi, restore } = setupSyncVaultFixture('oracle-vault-write-');
+    const lockPath = path.join(testOracleDataDir, 'vault-sync.lock');
 
     try {
       const result = syncVault({ dryRun: false, repoRoot });
@@ -324,6 +366,7 @@ describe('syncVault dry-run', () => {
       expect(fs.readFileSync(path.join(vaultProjectPsi, 'changed.md'), 'utf-8')).toContain('# changed local');
       expect(fs.existsSync(path.join(vaultProjectPsi, 'deleted.md'))).toBe(false);
       expect(realExecSync('git status --porcelain', { cwd: vaultPath, encoding: 'utf-8' }).trim()).toBe('');
+      expect(fs.existsSync(lockPath)).toBe(false);
     } finally {
       restore();
     }
@@ -352,6 +395,105 @@ describe('syncVault dry-run', () => {
       expect(fs.existsSync(path.join(vaultProjectPsi, 'deleted.md'))).toBe(false);
       expect(realExecSync('git status --porcelain', { cwd: vaultPath, encoding: 'utf-8' }).trim()).toBe('');
     } finally {
+      restore();
+    }
+  });
+});
+
+// ============================================================================
+// syncVault lock
+// ============================================================================
+
+describe('syncVault lock', () => {
+  it('dry-run does not acquire or refuse on an existing live lock', () => {
+    const { repoRoot, restore } = setupSyncVaultFixture('oracle-vault-lock-dry-');
+    const lockPath = path.join(testOracleDataDir, 'vault-sync.lock');
+
+    try {
+      fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, timestamp: new Date().toISOString() }));
+      const result = syncVault({ dryRun: true, repoRoot });
+      expect(result.dryRun).toBe(true);
+      expect(fs.existsSync(lockPath)).toBe(true);
+      expect(JSON.parse(fs.readFileSync(lockPath, 'utf-8')).pid).toBe(process.pid);
+    } finally {
+      fs.rmSync(lockPath, { force: true });
+      restore();
+    }
+  });
+
+  it('refuses real sync when a live lock exists', () => {
+    const { repoRoot, restore } = setupSyncVaultFixture('oracle-vault-lock-live-');
+    const lockPath = path.join(testOracleDataDir, 'vault-sync.lock');
+
+    try {
+      fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, timestamp: new Date().toISOString() }));
+      expect(() => syncVault({ dryRun: false, repoRoot })).toThrow(/Sync already running by PID/);
+      expect(JSON.parse(fs.readFileSync(lockPath, 'utf-8')).pid).toBe(process.pid);
+    } finally {
+      fs.rmSync(lockPath, { force: true });
+      restore();
+    }
+  });
+
+  it('reclaims a stale lock and releases after real sync', () => {
+    const { repoRoot, restore } = setupSyncVaultFixture('oracle-vault-lock-stale-');
+    const lockPath = path.join(testOracleDataDir, 'vault-sync.lock');
+
+    try {
+      fs.writeFileSync(lockPath, JSON.stringify({ pid: 999999, timestamp: '2026-01-01T00:00:00.000Z' }));
+      const result = syncVault({ dryRun: false, repoRoot });
+      expect(result.dryRun).toBe(false);
+      expect(fs.existsSync(lockPath)).toBe(false);
+    } finally {
+      fs.rmSync(lockPath, { force: true });
+      restore();
+    }
+  });
+});
+
+// ============================================================================
+// vaultStatus health
+// ============================================================================
+
+describe('vaultStatus health', () => {
+  it('includes health fields from stats endpoint and vector stats source', async () => {
+    const { vaultPath, repoRoot, restore } = setupSyncVaultFixture('oracle-vault-status-');
+    const now = Date.now();
+    fakeStats = { total: 36565, last_indexed: '2026-06-12T00:00:00.000Z', index_age_hours: 48 };
+    fakeVectorStats = {
+      vector: { enabled: true, count: 0, collection: 'oracle_scale' },
+      vectors: [
+        { key: 'scale', model: 'bge-m3', collection: 'oracle_scale', count: 0, enabled: true },
+      ],
+    };
+    handleStatsCalls = 0;
+    handleVectorStatsCalls = 0;
+    settings.set('vault_enabled', 'true');
+    settings.set('vault_last_sync', String(now - 3_600_000));
+
+    try {
+      const result = await vaultStatus(repoRoot);
+      expect(result.enabled).toBe(true);
+      expect(result.vaultPath).toBe(vaultPath);
+      expect(result.lastSync).toMatch(/T/);
+      expect(result.health?.lastIndex).toBe('2026-06-12T00:00:00.000Z');
+      expect(result.health?.indexedCount).toBe(36565);
+      expect(result.health?.vectorCount).toBe(36565);
+      expect(result.health?.vectorCollection).toBe('oracle_scale');
+      expect(result.health?.vectorCountSource).toBe('indexed-total');
+      expect(result.health?.staleAgeDays).toBe(2);
+      expect(result.health?.stale).toBe(false);
+      expect(result.health?.staleThresholdDays).toBe(7);
+      expect(result.health?.cadence.fts).toContain('FTS');
+      expect(result.health?.cadence.vector).toContain('weekly');
+      expect(result.health?.cadence.automation).toContain('Phase 4');
+      expect(handleStatsCalls).toBe(1);
+      expect(handleVectorStatsCalls).toBe(1);
+    } finally {
+      fakeStats = { total: 0, last_indexed: null, index_age_hours: null };
+      fakeVectorStats = { vector: { enabled: true, count: 0, collection: 'oracle_knowledge_bge_m3' }, vectors: [] };
+      settings.delete('vault_enabled');
+      settings.delete('vault_last_sync');
       restore();
     }
   });

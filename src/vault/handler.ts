@@ -4,6 +4,9 @@ import fs from 'fs';
 import path from 'path';
 import { execSync } from 'child_process';
 import { getSetting, setSetting } from '../db/index.ts';
+import { DB_PATH } from '../config.ts';
+import { handleStats } from '../server/handlers.ts';
+import { handleVectorStats } from '../server/vector-handlers.ts';
 import { detectProject } from '../server/project-detect.ts';
 import { ORACLE_DATA_DIR } from '../config.ts';
 import { walkFiles, resolveVaultPath, cleanEmptyDirs } from './discovery.ts';
@@ -56,6 +59,61 @@ type SyncPlan = {
   modified: number;
   deleted: number;
 };
+type SyncLock = { path: string; release: () => void };
+
+const SYNC_LOCK_FILE = 'vault-sync.lock';
+const INDEX_STALE_THRESHOLD_DAYS = 7;
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException)?.code === 'EPERM';
+  }
+}
+
+function parseLock(raw: string): { pid: number | null; timestamp: string | null } {
+  try {
+    const parsed = JSON.parse(raw) as { pid?: unknown; timestamp?: unknown };
+    return {
+      pid: typeof parsed.pid === 'number' ? parsed.pid : null,
+      timestamp: typeof parsed.timestamp === 'string' ? parsed.timestamp : null,
+    };
+  } catch {
+    const pidMatch = raw.match(/pid[:=]\s*(\d+)/i);
+    const tsMatch = raw.match(/timestamp[:=]\s*([^\n]+)/i);
+    return {
+      pid: pidMatch ? Number(pidMatch[1]) : null,
+      timestamp: tsMatch?.[1]?.trim() ?? null,
+    };
+  }
+}
+
+function acquireSyncLock(): SyncLock {
+  fs.mkdirSync(ORACLE_DATA_DIR, { recursive: true });
+  const lockPath = path.join(ORACLE_DATA_DIR, SYNC_LOCK_FILE);
+
+  if (fs.existsSync(lockPath)) {
+    const existing = parseLock(fs.readFileSync(lockPath, 'utf-8'));
+    if (existing.pid && isPidAlive(existing.pid)) {
+      throw new Error(`[Vault] Sync already running by PID ${existing.pid} (lock: ${lockPath})`);
+    }
+    fs.rmSync(lockPath, { force: true });
+  }
+
+  const lock = { pid: process.pid, timestamp: new Date().toISOString() };
+  fs.writeFileSync(lockPath, `${JSON.stringify(lock, null, 2)}\n`, { flag: 'wx' });
+
+  return {
+    path: lockPath,
+    release: () => {
+      if (!fs.existsSync(lockPath)) return;
+      const current = parseLock(fs.readFileSync(lockPath, 'utf-8'));
+      if (current.pid === process.pid) fs.rmSync(lockPath, { force: true });
+    },
+  };
+}
 
 function sameFileContent(dest: string, source: string, content?: string): boolean {
   if (!fs.existsSync(dest)) return false;
@@ -113,36 +171,41 @@ export function syncVault(opts: { dryRun?: boolean; repoRoot: string }): SyncRes
   const { added, modified, deleted } = plan;
   if (dryRun) return { dryRun: true, added, modified, deleted, project };
 
-  for (const { source, dest, content } of plan.writes) {
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
-    if (content !== undefined) fs.writeFileSync(dest, content);
-    else fs.copyFileSync(source, dest);
+  const lock = acquireSyncLock();
+  try {
+    for (const { source, dest, content } of plan.writes) {
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      if (content !== undefined) fs.writeFileSync(dest, content);
+      else fs.copyFileSync(source, dest);
+    }
+    for (const { path: filePath, stopAt } of plan.deletes) {
+      fs.unlinkSync(filePath);
+      cleanEmptyDirs(path.dirname(filePath), stopAt);
+    }
+
+    execSync('git add -A', { cwd: vaultPath, stdio: 'pipe' });
+    const status = execSync('git status --porcelain', { cwd: vaultPath, encoding: 'utf-8' }).trim();
+    if (!status) return { dryRun: true, added, modified, deleted, project };
+
+    const now = new Date();
+    const ts = now.toISOString().replace('T', ' ').replace(/\.\d+Z$/, '');
+    const parts: string[] = [];
+    if (added) parts.push(`+${added}`);
+    if (modified) parts.push(`~${modified}`);
+    if (deleted) parts.push(`-${deleted}`);
+    const summary = parts.length ? ` (${parts.join(', ')})` : '';
+    const projectTag = project ? ` [${project}]` : '';
+
+    execSync(`git commit -m "vault sync: ${ts}${summary}${projectTag}"`, { cwd: vaultPath, stdio: 'pipe' });
+    const commitHash = execSync('git rev-parse --short HEAD', { cwd: vaultPath, encoding: 'utf-8' }).trim();
+    execSync('git push', { cwd: vaultPath, stdio: 'pipe' });
+    setSetting('vault_last_sync', String(now.getTime()));
+
+    console.error(`[Vault] Synced: +${added} ~${modified} -${deleted} (${commitHash})`);
+    return { dryRun: false, added, modified, deleted, commitHash, project };
+  } finally {
+    lock.release();
   }
-  for (const { path: filePath, stopAt } of plan.deletes) {
-    fs.unlinkSync(filePath);
-    cleanEmptyDirs(path.dirname(filePath), stopAt);
-  }
-
-  execSync('git add -A', { cwd: vaultPath, stdio: 'pipe' });
-  const status = execSync('git status --porcelain', { cwd: vaultPath, encoding: 'utf-8' }).trim();
-  if (!status) return { dryRun: true, added, modified, deleted, project };
-
-  const now = new Date();
-  const ts = now.toISOString().replace('T', ' ').replace(/\.\d+Z$/, '');
-  const parts: string[] = [];
-  if (added) parts.push(`+${added}`);
-  if (modified) parts.push(`~${modified}`);
-  if (deleted) parts.push(`-${deleted}`);
-  const summary = parts.length ? ` (${parts.join(', ')})` : '';
-  const projectTag = project ? ` [${project}]` : '';
-
-  execSync(`git commit -m "vault sync: ${ts}${summary}${projectTag}"`, { cwd: vaultPath, stdio: 'pipe' });
-  const commitHash = execSync('git rev-parse --short HEAD', { cwd: vaultPath, encoding: 'utf-8' }).trim();
-  execSync('git push', { cwd: vaultPath, stdio: 'pipe' });
-  setSetting('vault_last_sync', String(now.getTime()));
-
-  console.error(`[Vault] Synced: +${added} ~${modified} -${deleted} (${commitHash})`);
-  return { dryRun: false, added, modified, deleted, commitHash, project };
 }
 
 export interface PullResult { files: number; project: string }
@@ -188,17 +251,83 @@ export function pullVault(opts: { repoRoot: string }): PullResult {
 export interface VaultStatusResult {
   enabled: boolean; repo: string | null; lastSync: string | null; vaultPath: string | null;
   pending?: { added: number; modified: number; deleted: number; total: number };
+  health?: {
+    lastIndex: string | null;
+    indexedCount: number | null;
+    vectorCount: number | null;
+    vectorCollection: string | null;
+    vectorCountSource: string;
+    staleAgeDays: number | null;
+    stale: boolean;
+    staleThresholdDays: number;
+    cadence: {
+      fts: string;
+      vector: string;
+      automation: string;
+    };
+  };
 }
 
-export function vaultStatus(repoRoot: string): VaultStatusResult {
+function toIso(ms: number | null): string | null {
+  return ms ? new Date(ms).toISOString() : null;
+}
+
+async function getIndexHealth(): Promise<VaultStatusResult['health']> {
+  let lastIndex: string | null = null;
+  let staleAgeDays: number | null = null;
+  let indexedCount: number | null = null;
+  let vectorCount: number | null = null;
+  let vectorCollection: string | null = null;
+  let vectorCountSource = 'unavailable';
+
+  try {
+    const stats = handleStats(DB_PATH);
+    lastIndex = stats.last_indexed;
+    indexedCount = stats.total;
+    staleAgeDays = stats.index_age_hours === null
+      ? null
+      : Math.max(0, Math.round((stats.index_age_hours / 24) * 10) / 10);
+  } catch { /* stats endpoint source unavailable */ }
+
+  try {
+    const vectorStats = await handleVectorStats();
+    vectorCount = vectorStats.vector.count;
+    vectorCollection = vectorStats.vector.collection;
+    vectorCountSource = 'vector-stats';
+  } catch { /* vector stats source unavailable */ }
+
+  if ((!vectorCount || vectorCount === 0) && indexedCount !== null) {
+    vectorCount = indexedCount;
+    vectorCountSource = 'indexed-total';
+  }
+
+  return {
+    lastIndex,
+    indexedCount,
+    vectorCount,
+    vectorCollection,
+    vectorCountSource,
+    staleAgeDays,
+    stale: lastIndex === null || (staleAgeDays ?? 0) > INDEX_STALE_THRESHOLD_DAYS,
+    staleThresholdDays: INDEX_STALE_THRESHOLD_DAYS,
+    cadence: {
+      fts: 'FTS can be refreshed frequently after content changes.',
+      vector: 'Batch semantic vector rebuilds about weekly; do not run them on every /rrr.',
+      automation: 'launchd automation belongs to Phase 4.',
+    },
+  };
+}
+
+export async function vaultStatus(repoRoot: string): Promise<VaultStatusResult> {
   const repo = getSetting('vault_repo');
   const enabled = getSetting('vault_enabled') === 'true';
   const lastSyncMs = getSetting('vault_last_sync');
-  if (!repo || !enabled) return { enabled: false, repo: null, lastSync: null, vaultPath: null };
+  const health = await getIndexHealth();
+  if (!repo || !enabled) return { enabled: false, repo: null, lastSync: null, vaultPath: null, health };
 
   let vaultPath: string | null = null;
   try { vaultPath = resolveVaultPath(repo); } catch {
-    return { enabled: true, repo, lastSync: lastSyncMs ? new Date(Number(lastSyncMs)).toISOString() : null, vaultPath: null };
+    return { enabled: true, repo, lastSync: toIso(Number(lastSyncMs)), vaultPath: null, health };
   }
 
   let pending = { added: 0, modified: 0, deleted: 0, total: 0 };
@@ -208,5 +337,5 @@ export function vaultStatus(repoRoot: string): VaultStatusResult {
     pending = { ...counts, total: counts.added + counts.modified + counts.deleted };
   } catch { /* git status failed */ }
 
-  return { enabled: true, repo, lastSync: lastSyncMs ? new Date(Number(lastSyncMs)).toISOString() : null, vaultPath, pending };
+  return { enabled: true, repo, lastSync: toIso(Number(lastSyncMs)), vaultPath, pending, health };
 }

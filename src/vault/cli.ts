@@ -15,7 +15,7 @@
  *   oracle-vault --version | -v
  */
 
-import { initVault, syncVault, pullVault, vaultStatus } from './handler.ts';
+import { initVault, syncVault, pullVault, vaultStatus, type VaultStatusResult } from './handler.ts';
 import { findPsiRepos, migrate } from './migrate.ts';
 import { detectProject } from '../server/project-detect.ts';
 import path from 'path';
@@ -68,6 +68,30 @@ Examples:
 const repoRoot = process.env.ORACLE_REPO_ROOT || process.cwd();
 const [command, ...args] = process.argv.slice(2);
 
+function printStatus(result: VaultStatusResult): void {
+  console.log(`enabled: ${result.enabled}`);
+  console.log(`repo: ${result.repo ?? '(not initialized)'}`);
+  console.log(`vault-path: ${result.vaultPath ?? '(unavailable)'}`);
+  console.log(`last-sync: ${result.lastSync ?? 'never'}`);
+
+  if (result.pending) {
+    console.log(`pending: +${result.pending.added} ~${result.pending.modified} -${result.pending.deleted} (total ${result.pending.total})`);
+  }
+
+  if (result.health) {
+    const age = result.health.staleAgeDays === null ? 'unknown' : `${result.health.staleAgeDays}d`;
+    const flag = result.health.stale ? ' stale' : '';
+    console.log(`last-index: ${result.health.lastIndex ?? 'never'}`);
+    console.log(`indexed-count: ${result.health.indexedCount ?? 'unknown'}`);
+    console.log(`vector-count: ${result.health.vectorCount ?? 'unknown'}`);
+    console.log(`vector-collection: ${result.health.vectorCollection ?? 'unknown'}`);
+    console.log(`vector-count-source: ${result.health.vectorCountSource}`);
+    console.log(`stale-age: ${age}${flag}`);
+    console.log(`stale-threshold: ${result.health.staleThresholdDays}d`);
+    console.log(`cadence: FTS frequent; vector weekly batch; launchd Phase 4`);
+  }
+}
+
 switch (command) {
   case 'init': {
     const repo = args[0];
@@ -94,8 +118,8 @@ switch (command) {
   }
 
   case 'status': {
-    const result = vaultStatus(repoRoot);
-    console.log(JSON.stringify(result, null, 2));
+    const result = await vaultStatus(repoRoot);
+    printStatus(result);
     break;
   }
 
