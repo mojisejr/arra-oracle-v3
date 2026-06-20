@@ -328,4 +328,31 @@ describe('syncVault dry-run', () => {
       restore();
     }
   });
+
+  it('write-run preserves other oracles universal resonance while deleting this projects stale files', () => {
+    const { vaultPath, repoRoot, vaultProjectPsi, restore } = setupSyncVaultFixture('oracle-vault-universal-');
+    const localResonance = path.join(repoRoot, 'ψ', 'memory', 'resonance');
+    const vaultResonance = path.join(vaultPath, 'ψ', 'memory', 'resonance');
+
+    try {
+      fs.mkdirSync(localResonance, { recursive: true });
+      fs.mkdirSync(vaultResonance, { recursive: true });
+      fs.writeFileSync(path.join(localResonance, 'oracle-a.md'), '# oracle A resonance\n');
+      fs.writeFileSync(path.join(vaultResonance, 'oracle-b.md'), '# oracle B resonance\n');
+      realExecSync('git add -A && git commit -m resonance-fixture && git push', { cwd: vaultPath, stdio: 'pipe' });
+
+      const result = syncVault({ dryRun: false, repoRoot });
+      expect(result.dryRun).toBe(false);
+      expect(result.added).toBe(2);
+      expect(result.modified).toBe(1);
+      expect(result.deleted).toBe(1);
+
+      expect(fs.existsSync(path.join(vaultResonance, 'oracle-a.md'))).toBe(true);
+      expect(fs.readFileSync(path.join(vaultResonance, 'oracle-b.md'), 'utf-8')).toContain('oracle B resonance');
+      expect(fs.existsSync(path.join(vaultProjectPsi, 'deleted.md'))).toBe(false);
+      expect(realExecSync('git status --porcelain', { cwd: vaultPath, encoding: 'utf-8' }).trim()).toBe('');
+    } finally {
+      restore();
+    }
+  });
 });

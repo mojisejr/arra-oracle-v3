@@ -94,14 +94,6 @@ function planSync(psiDir: string, repoRoot: string, vaultPath: string, project: 
       }
     }
   }
-  for (const category of UNIVERSAL_CATEGORIES) {
-    const vaultCategoryDir = path.join(vaultPath, category);
-    if (!fs.existsSync(vaultCategoryDir)) continue;
-    for (const { relativePath: vr, fullPath: vf } of walkFiles(vaultCategoryDir, vaultPath)) {
-      if (!vaultDestPaths.has(vr)) deletes.push({ path: vf, stopAt: path.join(vaultPath, 'ψ') });
-    }
-  }
-
   return { writes, deletes, added, modified, deleted: deletes.length };
 }
 
