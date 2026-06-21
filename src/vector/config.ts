@@ -12,6 +12,7 @@ import fs from 'fs';
 import path from 'path';
 import { ORACLE_DATA_DIR, LANCEDB_DIR, VECTORS_DB_PATH } from '../config.ts';
 import { COLLECTION_NAME } from '../const.ts';
+import { assertSafeTestWritePath } from '../test-sandbox-guard.ts';
 import type { EmbeddingProviderType, VectorDBType } from './types.ts';
 
 export const VECTOR_CONFIG_FILE = 'vector-server.json';
@@ -141,8 +142,9 @@ export function loadVectorConfig(): VectorServerConfig | null {
  * Write vector-server.json to ORACLE_DATA_DIR.
  * Creates the directory if needed.
  */
-export function writeVectorConfig(config: VectorServerConfig): string {
-  const fp = configPath();
+export function writeVectorConfig(config: VectorServerConfig, targetPath = configPath()): string {
+  const fp = targetPath;
+  assertSafeTestWritePath(fp, 'writeVectorConfig');
   fs.mkdirSync(path.dirname(fp), { recursive: true });
   fs.writeFileSync(fp, JSON.stringify(config, null, 2) + '\n', 'utf-8');
   return fp;

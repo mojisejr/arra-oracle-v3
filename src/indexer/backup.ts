@@ -7,6 +7,7 @@ import fs from 'fs';
 import path from 'path';
 import { Database } from 'bun:sqlite';
 import type { IndexerConfig } from '../types.ts';
+import { assertSafeTestWritePath } from '../test-sandbox-guard.ts';
 
 const DEFAULT_BACKUP_KEEP = 10;
 
@@ -114,6 +115,8 @@ function rotateBackups(dbPath: string, keep: number): void {
  */
 export function backupDatabase(sqlite: Database, config: IndexerConfig): void {
   const lockPath = `${config.dbPath}.backup.lock`;
+  assertSafeTestWritePath(config.dbPath, 'backupDatabase');
+  assertSafeTestWritePath(lockPath, 'backupDatabase lock');
 
   if (!acquireLock(lockPath)) {
     console.log('⏳ Backup already in progress (locked by another process) — skipping');
