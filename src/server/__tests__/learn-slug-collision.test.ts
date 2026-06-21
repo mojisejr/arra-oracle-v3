@@ -29,6 +29,7 @@ process.env.ORACLE_DATA_DIR = TMP_DATA_DIR;
 
 // Dynamic import after env is set (REPO_ROOT and DB_PATH are module-frozen).
 const { handleLearn } = await import('../handlers.ts');
+const { REPO_ROOT } = await import('../../config.ts');
 
 describe('handleLearn — slug collision', () => {
   // Slug is built from pattern.substring(0, 50). Use a 50-char prefix so any
@@ -43,7 +44,7 @@ describe('handleLearn — slug collision', () => {
     const res = handleLearn(`${PATTERN_PREFIX}\nbody one`);
     expect(res.success).toBe(true);
     expect(res.file).toMatch(new RegExp(`ψ/memory/learnings/\\d{4}-\\d{2}-\\d{2}_${EXPECTED_SLUG}\\.md$`));
-    expect(fs.existsSync(path.join(TMP_REPO_ROOT, res.file))).toBe(true);
+    expect(fs.existsSync(path.join(REPO_ROOT, res.file))).toBe(true);
   });
 
   it('second write with the SAME slug-producing prefix gets a -2 suffix (no 500)', () => {
@@ -51,7 +52,7 @@ describe('handleLearn — slug collision', () => {
     expect(res.success).toBe(true);
     expect(res.file).toMatch(new RegExp(`_${EXPECTED_SLUG}-2\\.md$`));
     expect(res.id).toMatch(/-2$/);
-    expect(fs.existsSync(path.join(TMP_REPO_ROOT, res.file))).toBe(true);
+    expect(fs.existsSync(path.join(REPO_ROOT, res.file))).toBe(true);
   });
 
   it('third write bumps to -3', () => {
@@ -77,7 +78,7 @@ describe('handleLearn — slug collision', () => {
     );
     expect(res.success).toBe(true);
 
-    const markdown = fs.readFileSync(path.join(TMP_REPO_ROOT, res.file), 'utf-8');
+    const markdown = fs.readFileSync(path.join(REPO_ROOT, res.file), 'utf-8');
     expect(markdown).toContain(`id: ${res.id}`);
     expect(markdown).toContain('type: learning');
     expect(markdown).toContain('concepts: [frontmatter, vector]');
@@ -93,8 +94,10 @@ describe('handleLearn — slug collision', () => {
 });
 
 afterAll(() => {
-  try { fs.rmSync(TMP_REPO_ROOT, { recursive: true, force: true }); } catch {}
-  try { fs.rmSync(TMP_DATA_DIR, { recursive: true, force: true }); } catch {}
+  if (process.env.ORACLE_TEST_SANDBOX !== '1') {
+    try { fs.rmSync(TMP_REPO_ROOT, { recursive: true, force: true }); } catch {}
+    try { fs.rmSync(TMP_DATA_DIR, { recursive: true, force: true }); } catch {}
+  }
   if (ORIGINAL_REPO_ROOT) process.env.ORACLE_REPO_ROOT = ORIGINAL_REPO_ROOT;
   else delete process.env.ORACLE_REPO_ROOT;
   if (ORIGINAL_DATA_DIR) process.env.ORACLE_DATA_DIR = ORIGINAL_DATA_DIR;

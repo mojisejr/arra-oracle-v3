@@ -15,6 +15,7 @@ import path from 'path';
 import fs from 'fs';
 import * as schema from './schema.ts';
 import { DB_PATH, ORACLE_DATA_DIR } from '../config.ts';
+import { assertSafeTestWritePath } from '../test-sandbox-guard.ts';
 
 // Migrations folder (relative to this file)
 const MIGRATIONS_FOLDER = path.join(import.meta.dirname || __dirname, 'migrations');
@@ -104,6 +105,7 @@ export function createDatabase(dbPath?: string): {
   db: BunSQLiteDatabase<typeof schema>;
 } {
   const resolvedPath = dbPath || DB_PATH;
+  assertSafeTestWritePath(resolvedPath, 'createDatabase');
 
   // Ensure parent directory exists
   const dir = path.dirname(resolvedPath);
@@ -124,6 +126,7 @@ export function createDatabase(dbPath?: string): {
 // ============================================================================
 
 // Ensure data dir exists before opening DB
+assertSafeTestWritePath(DB_PATH, 'default database');
 if (!fs.existsSync(ORACLE_DATA_DIR)) {
   fs.mkdirSync(ORACLE_DATA_DIR, { recursive: true });
 }

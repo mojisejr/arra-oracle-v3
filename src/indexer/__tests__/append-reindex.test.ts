@@ -26,11 +26,12 @@ delete process.env.ORACLE_REPO_ROOT;
 
 const { runOracleReindex } = await import('../runner.ts');
 const { createDatabase, closeDb } = await import('../../db/index.ts');
+const { DB_PATH } = await import('../../config.ts');
 
 describe('append reindex mode', () => {
   afterAll(() => {
     try { closeDb(); } catch {}
-    fs.rmSync(tmp, { recursive: true, force: true });
+    if (process.env.ORACLE_TEST_SANDBOX !== '1') fs.rmSync(tmp, { recursive: true, force: true });
     if (originalDataDir === undefined) delete process.env.ORACLE_DATA_DIR;
     else process.env.ORACLE_DATA_DIR = originalDataDir;
     if (originalDbPath === undefined) delete process.env.ORACLE_DB_PATH;
@@ -40,7 +41,15 @@ describe('append reindex mode', () => {
   });
 
   test('upserts from a new repo root without deleting older indexed docs', async () => {
-    const first = await runOracleReindex({ repoRoot: repoA });
+    const previousForce = process.env.ORACLE_FORCE_REINDEX;
+    process.env.ORACLE_FORCE_REINDEX = '1';
+    let first: Awaited<ReturnType<typeof runOracleReindex>>;
+    try {
+      first = await runOracleReindex({ repoRoot: repoA });
+    } finally {
+      if (previousForce === undefined) delete process.env.ORACLE_FORCE_REINDEX;
+      else process.env.ORACLE_FORCE_REINDEX = previousForce;
+    }
     expect(first.ok).toBe(true);
     expect(first.append).toBe(false);
 
@@ -48,7 +57,7 @@ describe('append reindex mode', () => {
     expect(second.ok).toBe(true);
     expect(second.append).toBe(true);
 
-    const { sqlite } = createDatabase(process.env.ORACLE_DB_PATH);
+    const { sqlite } = createDatabase(DB_PATH);
     try {
       const rows = sqlite.prepare(`
         SELECT source_file AS sourceFile

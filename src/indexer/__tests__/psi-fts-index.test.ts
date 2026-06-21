@@ -25,11 +25,12 @@ delete process.env.ORACLE_REPO_ROOT;
 
 const { normalizeIndexerRepoRoot, runOracleReindex } = await import('../runner.ts');
 const { createDatabase, closeDb } = await import('../../db/index.ts');
+const { DB_PATH } = await import('../../config.ts');
 
 describe('ψ-folder detection → FTS indexing', () => {
   afterAll(() => {
     try { closeDb(); } catch {}
-    fs.rmSync(tmp, { recursive: true, force: true });
+    if (process.env.ORACLE_TEST_SANDBOX !== '1') fs.rmSync(tmp, { recursive: true, force: true });
     if (originalDataDir === undefined) delete process.env.ORACLE_DATA_DIR;
     else process.env.ORACLE_DATA_DIR = originalDataDir;
     if (originalDbPath === undefined) delete process.env.ORACLE_DB_PATH;
@@ -43,11 +44,19 @@ describe('ψ-folder detection → FTS indexing', () => {
   });
 
   test('indexes an explicit ψ folder into SQLite FTS without vector setup', async () => {
-    const result = await runOracleReindex({ repoRoot: psiRoot });
+    const previousForce = process.env.ORACLE_FORCE_REINDEX;
+    process.env.ORACLE_FORCE_REINDEX = '1';
+    let result: Awaited<ReturnType<typeof runOracleReindex>>;
+    try {
+      result = await runOracleReindex({ repoRoot: psiRoot });
+    } finally {
+      if (previousForce === undefined) delete process.env.ORACLE_FORCE_REINDEX;
+      else process.env.ORACLE_FORCE_REINDEX = previousForce;
+    }
     expect(result.ok).toBe(true);
     expect(result.repoRoot).toBe(repoRoot);
 
-    const { sqlite } = createDatabase(process.env.ORACLE_DB_PATH);
+    const { sqlite } = createDatabase(DB_PATH);
     try {
       const row = sqlite.prepare(`
         SELECT d.source_file, f.content

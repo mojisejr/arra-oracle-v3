@@ -52,8 +52,10 @@ describe('POST /api/traces', () => {
 });
 
 afterAll(() => {
-  fs.rmSync(repoRoot, { recursive: true, force: true });
-  fs.rmSync(dataDir, { recursive: true, force: true });
+  if (process.env.ORACLE_TEST_SANDBOX !== '1') {
+    fs.rmSync(repoRoot, { recursive: true, force: true });
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
   if (originalRepoRoot) process.env.ORACLE_REPO_ROOT = originalRepoRoot;
   else delete process.env.ORACLE_REPO_ROOT;
   if (originalDataDir) process.env.ORACLE_DATA_DIR = originalDataDir;

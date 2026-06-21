@@ -62,7 +62,7 @@ describe('POST /api/supersede/document', () => {
 });
 
 afterAll(() => {
-  fs.rmSync(dataDir, { recursive: true, force: true });
+  if (process.env.ORACLE_TEST_SANDBOX !== '1') fs.rmSync(dataDir, { recursive: true, force: true });
   if (originalDataDir) process.env.ORACLE_DATA_DIR = originalDataDir;
   else delete process.env.ORACLE_DATA_DIR;
   if (originalDbPath) process.env.ORACLE_DB_PATH = originalDbPath;

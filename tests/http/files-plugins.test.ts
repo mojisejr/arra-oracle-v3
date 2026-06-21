@@ -9,6 +9,12 @@ import { join } from 'path';
 const WASM_HEADER = Buffer.from([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
 
 let tmp: string;
+const originalEnv = {
+  GHQ_ROOT: process.env.GHQ_ROOT,
+  HOME: process.env.HOME,
+  ORACLE_DATA_DIR: process.env.ORACLE_DATA_DIR,
+  ORACLE_REPO_ROOT: process.env.ORACLE_REPO_ROOT,
+};
 // combined: mirrors production — files.ts registers /api/plugins first and
 // shadows plugins.ts. pluginsOnly: canonical dual-layout scanner in isolation.
 let combined: any;
@@ -74,6 +80,10 @@ const req = (path: string) => new Request(`http://localhost${path}`);
 
 afterAll(() => {
   if (tmp) rmSync(tmp, { recursive: true, force: true });
+  for (const [key, value] of Object.entries(originalEnv)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
 });
 
 describe('GET /api/file — security', () => {

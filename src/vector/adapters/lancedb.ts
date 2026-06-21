@@ -6,6 +6,7 @@
  */
 
 import type { VectorStoreAdapter, VectorDocument, VectorQueryResult, EmbeddingProvider } from '../types.ts';
+import { assertSafeTestWritePath } from '../../test-sandbox-guard.ts';
 
 export class LanceDBAdapter implements VectorStoreAdapter {
   readonly name = 'lancedb';
@@ -23,6 +24,7 @@ export class LanceDBAdapter implements VectorStoreAdapter {
 
   async connect(): Promise<void> {
     if (this.db) return;
+    assertSafeTestWritePath(this.dbPath, 'LanceDBAdapter.connect');
 
     const lancedb = await import('@lancedb/lancedb');
     this.db = await lancedb.connect(this.dbPath);

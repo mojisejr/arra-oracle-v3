@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'n
 import { dirname, join } from 'node:path';
 
 import { ORACLE_DATA_DIR } from '../config.ts';
+import { assertSafeTestWritePath } from '../test-sandbox-guard.ts';
 
 const HEX_32_BYTES = /^[0-9a-f]{64}$/i;
 const DEFAULT_KEY_PATH = join(ORACLE_DATA_DIR, 'peer-key.hex');
@@ -25,6 +26,7 @@ function validate(hex: string, source: string): string {
 }
 
 export function getPubkeyHex(keyPath = DEFAULT_KEY_PATH): string {
+  assertSafeTestWritePath(keyPath, 'getPubkeyHex');
   const cached = cache.get(keyPath);
   if (cached) return cached;
 

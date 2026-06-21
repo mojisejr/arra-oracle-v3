@@ -15,8 +15,9 @@ export async function proxyVectorIndexer(
   set: StatusSetter,
   init: RequestInit = {},
 ): Promise<unknown | null> {
-  if (!VECTOR_URL) return null;
-  const url = `${VECTOR_URL.replace(/\/+$/, '')}/api/vector/index/${path}`;
+  const vectorUrl = process.env.VECTOR_URL || VECTOR_URL;
+  if (!vectorUrl) return null;
+  const url = `${vectorUrl.replace(/\/+$/, '')}/api/vector/index/${path}`;
 
   try {
     const res = await fetch(url, {
@@ -34,7 +35,7 @@ export async function proxyVectorIndexer(
     set.status = 503;
     return {
       error: 'Vector proxy unavailable',
-      proxy: VECTOR_URL,
+      proxy: vectorUrl,
       detail: e instanceof Error ? e.message : String(e),
     };
   }

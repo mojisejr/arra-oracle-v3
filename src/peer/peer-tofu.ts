@@ -2,6 +2,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'n
 import { dirname, join } from 'node:path';
 
 import { ORACLE_DATA_DIR } from '../config.ts';
+import { assertSafeTestWritePath } from '../test-sandbox-guard.ts';
 
 export type PinStatus = 'new' | 'pinned';
 
@@ -18,6 +19,7 @@ function readPins(path = defaultPinPath()): Record<string, string> {
   return JSON.parse(readFileSync(path, 'utf8')) as Record<string, string>;
 }
 function writePins(pins: Record<string, string>, path = defaultPinPath()) {
+  assertSafeTestWritePath(path, 'writePins');
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   writeFileSync(path, `${JSON.stringify(pins, null, 2)}\n`, { mode: 0o600 });
   try { chmodSync(path, 0o600); } catch {}

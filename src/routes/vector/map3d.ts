@@ -11,12 +11,15 @@ import { createVectorProxy } from '../../server/vector-proxy.ts';
 import { VECTOR_URL } from '../../config.ts';
 import { Map3dQuery } from './model.ts';
 
-const proxy = createVectorProxy(VECTOR_URL);
+function currentProxy() {
+  return createVectorProxy(process.env.VECTOR_URL || VECTOR_URL);
+}
 
 export const map3dEndpoint = new Elysia().get(
   '/map3d',
   async ({ query, set }) => {
     const model = query.model || undefined;
+    const proxy = currentProxy();
 
     // VECTOR_URL set -> proxy first, fall back to local on failure.
     if (proxy) {
